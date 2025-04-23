@@ -3,14 +3,33 @@ pacman::p_load(
   dplyr, tidyr, jsonlite, purrr, readr, stringr, glue, here
 )
 
-# Define Input & Output Directories
-json_dir <- here("data/1-raw/openalex/json")     # Directory with JSON files
-csv_dir  <- here("data/2-cleaned/openalex")      # Directory to save combined CSVs
+# PARAMETERS -------------------------------------------------------------------
+data_type <- "query"   # <-- CHANGE THIS to "query" or "journal" as needed
 
-# Ensure output directory exists
+if (data_type == "query") {
+  json_dir <- here("data/1-raw/openalex")
+  csv_prefix_papers  <- "openalex_papers"
+  csv_prefix_authors <- "openalex_authors"
+  
+  year_pattern <- "openalex_\\d{4}_Q\\d\\.json"
+  file_pattern <- function(year) glue("openalex_{year}_Q\\d\\.json")
+  
+} else if (data_type == "journal") {
+  json_dir <- here("data/1-raw/openalex_journal")
+  csv_prefix_papers  <- "openalex_papers_journal"
+  csv_prefix_authors <- "openalex_authors_journal"
+  
+  year_pattern <- "openalex_.*_\\d{4}\\.json"
+  file_pattern <- function(year) glue("openalex_.*_{year}\\.json")
+  
+} else {
+  stop("Invalid data_type specified. Use 'query' or 'journal'.")
+}
+
+csv_dir  <- here("data/2-cleaned/openalex")
 dir.create(csv_dir, recursive = TRUE, showWarnings = FALSE)
 
-# Function to Parse Single JSON File
+# Function to Parse Single JSON File -------------------------------------------
 parse_openalex_json <- function(json_file) {
   print(glue("Parsing JSON: {json_file}..."))
   
@@ -38,8 +57,8 @@ parse_openalex_json <- function(json_file) {
     select(-ids, -author) |>  
     select(any_of(c(
       "doi", "oa_id" = "id", "pmid", "issn_l", "title", "abstract" = "ab",
-      "publication_year", "publication_date", "type", "url", "pdf_url",
-      "oa_url", "version", "language", "cited_by_count", "is_retracted", "source" = "so"
+      "publication_year", "publication_date", "type", "url", "oa_url",
+      "version", "language", "cited_by_count", "is_retracted", "source" = "so"
     ))) |> 
     mutate(
       publication_date = as.Date(publication_date),
@@ -64,13 +83,23 @@ parse_openalex_json <- function(json_file) {
   return(list(papers = papers_df, authors = authors_df))
 }
 
-# --- Process JSON Files by Year ---
-years <- unique(str_extract(list.files(json_dir, pattern = "openalex_\\d{4}_Q\\d\\.json"), "\\d{4}"))
+# --- Process JSON Files by Year -----------------------------------------------
+# Dynamic year extraction based on data_type
+if (data_type == "query") {
+  years <- unique(str_extract(list.files(json_dir, pattern = year_pattern), "(?<=openalex_)\\d{4}(?=_Q\\d\\.json)"))
+} else if (data_type == "journal") {
+  years <- unique(str_extract(list.files(json_dir, pattern = year_pattern), "(?<=_)\\d{4}(?=\\.json)"))
+}
 
 for (year in years) {
   print(glue("Processing year: {year}"))
   
-  year_json_files <- list.files(json_dir, pattern = glue("openalex_{year}_Q\\d\\.json"), full.names = TRUE)
+  year_json_files <- list.files(json_dir, pattern = file_pattern(year), full.names = TRUE)
+  
+  if (length(year_json_files) == 0) {
+    warning(glue("No JSON files found for year {year}. Skipping..."))
+    next
+  }
   
   all_papers <- list()
   all_authors <- list()
@@ -86,13 +115,18 @@ for (year in years) {
     }
   }
   
-  # Combine quarterly data
+  if (length(all_papers) == 0) {
+    warning(glue("No paper data parsed for {year}. Skipping CSV save."))
+    next
+  }
+  
+  # Combine data
   year_papers_df  <- bind_rows(all_papers) |> distinct()
   year_authors_df <- bind_rows(all_authors) |> distinct()
   
   # Define output file paths
-  papers_csv  <- file.path(csv_dir, glue("openalex_papers_{year}.csv"))
-  authors_csv <- file.path(csv_dir, glue("openalex_authors_{year}.csv"))
+  papers_csv  <- file.path(csv_dir, glue("{csv_prefix_papers}_{year}.csv"))
+  authors_csv <- file.path(csv_dir, glue("{csv_prefix_authors}_{year}.csv"))
   
   # Save combined CSVs
   write_csv(year_papers_df, papers_csv)

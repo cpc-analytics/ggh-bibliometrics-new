@@ -30,7 +30,7 @@ journal_ids <- journal_issn_id$journal_id
 year_seq <- as.character(2014:2024)
 
 # Output folder for JSON
-json_dir <- here("data/1-raw/openalex/json_by_journal")
+json_dir <- here("data/1-raw/openalex_journal")
 dir.create(json_dir, recursive = TRUE, showWarnings = FALSE)
 
 api_calls_made <- 0
