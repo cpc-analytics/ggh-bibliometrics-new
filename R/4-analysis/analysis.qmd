@@ -1,0 +1,941 @@
+---
+title: "Germany Global Health Analysis"
+format:
+  html: 
+    default: true  # Ensure HTML rendering works
+    self-contained: false
+    math: false
+  pdf:
+    pdf-engine: xelatex  # Change to xelatex to support Unicode
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Load core tidyverse + plotting
+pacman::p_load(tidyverse, lubridate, ggplot2, ggrepel, stringr, tibble, dplyr, janitor)
+
+# Then load table + file manipulation
+pacman::p_load(here, readxl, jsonlite, httr, knitr, data.table, tidyr, stringi)
+
+# Then load extras separately
+pacman::p_load(gt, gtExtras, countrycode, stringdist, tinytex, htmltools)
+```
+
+```{r overview, include=FALSE}
+# read the df
+openalex_pubmed_papers <- fread(here("data/3-merged/openalex_pubmed_papers_merged_2025-04-29.csv"))
+nrow(openalex_pubmed_papers)#105605
+
+papers_2024 <- openalex_pubmed_papers %>%
+  filter(publication_year == "2024")
+nrow(papers_2024)#18437
+```
+
+
+# Overview
+
+The datasets we are analyzing are from OpenAlex and PubMed with "global health" exist in paper title or abstract. There are originally 66264 articles from PubMed and 105635 articles from OpenAlex. After de-duplication, there are in total `r nrow(openalex_pubmed_papers)` articles from OpenAlex and PubMed in the course of last 11 years (2014 to 2024). We removed 24400 duplicates by comparing the identifiers `doi` and `pmid` and openalex id and merged entries from OpenAlex and PubMed. 
+
+Note: we only look at non-retracted, published articles of the following type: article, review, book, book-chapter, editorial, letter, report, case reports, meta analysis, comment, systematic review, comparative study.
+
+```{r ggplot, include=FALSE}
+n_openalex <- openalex_pubmed_papers %>% filter(from_openalex == TRUE) %>% nrow()
+n_pubmed <- openalex_pubmed_papers %>% filter(from_pubmed == TRUE) %>% nrow()
+n_both <- openalex_pubmed_papers %>%
+  filter(from_openalex == TRUE & from_pubmed == TRUE) %>%
+  nrow()
+```
+
+```{r plot, echo=FALSE}
+plot_data <- tibble(
+  Source = c("OpenAlex Only", "PubMed Only", "Both"),
+  Count = c(
+    n_openalex - n_both,
+    n_pubmed - n_both,
+    n_both
+  )
+)
+
+ggplot(plot_data, aes(x = Source, y = Count, fill = Source)) +
+  geom_bar(stat = "identity", width = 0.6) +
+  geom_text(aes(label = scales::comma(Count)), 
+            vjust = -0.5, size = 4) +
+  scale_fill_viridis_d(option = "D") +
+  scale_y_continuous(labels = scales::comma) +  # Format y-axis labels as plain numbers
+  labs(
+    title = "Paper Source Distribution",
+    subtitle = glue::glue("n = {scales::comma(n_openalex + n_pubmed - n_both)}"),
+    x = NULL,
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5)
+  )
+```
+
+```{r affil overview, include=FALSE}
+openalex_pubmed_affil <- fread("data/3-merged/openalex_pubmed_affil.csv")
+
+# convert iso two letter country code into country name
+openalex_pubmed_affil <- openalex_pubmed_affil %>%
+  mutate(
+    COUNTRY = ifelse(country_code == "XK", "Kosovo", COUNTRY),  # Handle XK first
+    COUNTRY = ifelse(is.na(COUNTRY) & !is.na(country_code), 
+                     suppressWarnings(countrycode(country_code, "iso2c", "country.name")),  # Suppress XK warning
+                     COUNTRY)
+  )
+
+openalex_pubmed_affil <- openalex_pubmed_affil %>%
+  mutate(
+    institution_display_name = case_when(
+      institution_display_name == "Ludwig Maximilians University (LMU)" ~ "Ludwig-Maximilians-Universität München",
+      institution_display_name == "Technical University of Munich (TUM)" ~ "Technical University of Munich",
+      institution_display_name == "Free University of Berlin (FU Berlin)" ~ "Freie Universität Berlin",
+      institution_display_name == "Charité University Medicine Berlin" ~ "Charité - Universitätsmedizin Berlin",
+      institution_display_name == "Humboldt University of Berlin (HU Berlin)" ~ "Humboldt-Universität zu Berlin",
+      institution_display_name == "German Center for Infection Research" ~ "German Center for Infection Research (DZIF)",
+      institution_display_name == "Federal Institute for Risk Assessment" ~ "Federal Institute for Risk Assessment (BfR)",
+      institution_display_name == "University of Tübingen (Uni Tübingen)" ~ "University of Tübingen",
+      TRUE ~ institution_display_name  # Keep original if no match
+    )
+  )
+
+openalex_pubmed_affil <- openalex_pubmed_affil %>%
+  mutate(primary_id = coalesce(as.character(pmid), as.character(oa_id)))
+
+affil_2024 <- openalex_pubmed_affil %>%
+  filter(primary_id %in% papers_2024$primary_id)
+
+na_institution_name <- openalex_pubmed_affil %>% filter(is.na(institution_display_name)) %>% nrow()
+na_country <- openalex_pubmed_affil %>% filter(is.na(COUNTRY)) %>% nrow()
+na_institution_name_perc <- na_institution_name / nrow(openalex_pubmed_affil)
+na_country_perc <- na_country / nrow(openalex_pubmed_affil)
+```
+
+Out of the total records in the affiliations dataset,  `r round(na_institution_name_perc * 100, 2)`% do not have institution names recorded,  and `r round(na_country_perc * 100, 2)`% are missing country information.
+
+### Deduplication
+
+1. 24400 duplicated rows were removed from OpenAlex data by grouping `pmid` and `doi` and `oa_id` and prioritize highest citation counts and the latest date.
+2. After full join OpenAlex and PubMed data, we grouped by `doi` and `pmid` and merged the duplicated rows (mostly when OpenAlex has missing value in `pmid` while PubMed data have valid `pmid` info). The merged column information prioritize taking OpenAlex's information and then PubMed, 2746 duplicated rows were removed.
+3. For affiliation information from papers that both exist in OpenAlex and PubMed, we prioritize using OpenAlex's information and fall back to PubMed's information if the affiliation information is not available in OpenAlex.
+
+# Affiliation Cleaning Results
+
+### PubMed Completeness
+
+1. Synonym Table Matching: We first match the affiliations with our synonym table, 88% of the affiliations received a match at this step.
+2. ROR API Matching: Unmatched affiliations strings were passed through the ROR API, a cumulative of 94% of the affiliations were matched until this step.
+3. ChatGPT Matching: The remaining unmatched affiliation strings were processed using ChatGPT to extract details such as institution, country and city. 
+4. Some of the extracted institution names were matched with ROR institution names for standardization.
+
+* Full confidence match: chosen=True & score=1 ~44 %(9590/21982)
+* High confidence match: chosen=False & score=1 OR chosen=False & score=(0.9:0.99) ~56% - obvious mistakes happen when score=0.91
+
+## Top Producing Countries from 2014 to 2024
+
+This table highlights the countries that contributed the most to global health publications between 2014 and 2024. For each paper, we extracted the list of contributing countries based on author affiliations. To avoid double-counting, we ensured each country was only counted once per paper, even if it had multiple affiliated institutions. We then aggregated the number of unique papers associated with each country and ranked them based on publication volume.
+
+```{r countries, echo=FALSE}
+# filter logic to avoid double counting different institutions in the same country
+top_country <- openalex_pubmed_affil %>%
+  filter(!is.na(COUNTRY)) %>%
+  distinct(primary_id, COUNTRY, .keep_all = TRUE) %>%
+  count(COUNTRY, sort = TRUE)
+
+top_country %>% 
+  gt() %>% 
+  tab_header(
+    title = md("Top Producing Countries from 2014 to 2024")
+  ) %>%
+  cols_label(
+    COUNTRY = "Country",
+    n = "Number of Papers"
+  ) %>%
+  sub_missing(columns = everything(), missing_text = "-") %>% 
+  opt_interactive(
+    use_search = FALSE, 
+    use_sorting = TRUE, 
+    use_filters = TRUE,  
+    page_size_default = 10 
+  ) %>%
+  tab_options(
+    table.font.size = px(14), 
+    table.border.top.width = px(0),  
+    heading.align = "center"  
+  )
+```
+
+## Top Producing Countries in 2024
+
+This table shows the countries that contributed the most to global health publications in the year 2024, based on unique paper counts by country.
+
+```{r top country 2024, echo=FALSE}
+top_country_2024 <- affil_2024 %>%
+  filter(!is.na(COUNTRY)) %>%
+  distinct(primary_id, COUNTRY, .keep_all = TRUE) %>%
+  count(COUNTRY, sort = TRUE)
+
+top_country_2024 %>% 
+  gt() %>% 
+  tab_header(
+    title = md("Top Producing Countries in 2024")
+  ) %>%
+  cols_label(
+    COUNTRY = "Country",
+    n = "Number of Papers"
+  ) %>% 
+  sub_missing(columns = everything(), missing_text = "-") %>% 
+  opt_interactive(
+    use_search = FALSE, 
+    use_sorting = TRUE, 
+    use_filters = TRUE,  
+    page_size_default = 10 
+  ) %>%
+  tab_options(
+    table.font.size = px(14), 
+    table.border.top.width = px(0),  
+    heading.align = "center"  
+  )
+```
+## Number of publications by country by year
+
+This table shows the top 10 countries in terms of the number of global health publications per year from 2014 to 2024. Each row represents a country, with yearly publication counts, the Compound Annual Growth Rate (CAGR) over the 11-year period, and a trendline visualization. In the trendline, purple dot represents the **first value** in the trend (i.e., the value in 2014) and green dot represents the **last value** in the trend (i.e., the value in 2024). 
+
+Leading example: The United States had 3,359 publications in 2014, increasing to 8,724 in 2024, with a CAGR of 10.01%, meaning the number of publications grew by about 10% per year on average, compounded annually. The U.S. trendline shows strong early growth in publications, peaking around 2021, followed by a slight decline. The green dot (2024) sits lower than the peak and appears mid-line, signaling that while there's been growth overall (CAGR of 10%), recent years saw a tapering off rather than continued upward movement.
+
+```{r publications by country by year, echo=FALSE}
+paper_years <- openalex_pubmed_papers %>%
+  mutate(
+    publication_year = as.character(publication_year)
+  ) %>%
+  select(primary_id, publication_year) %>%
+  filter(publication_year != "2025")
+
+affil_country <- openalex_pubmed_affil %>%
+  filter(!is.na(COUNTRY)) %>%
+  select(primary_id, COUNTRY) %>%
+  distinct()  # Remove duplicates
+
+country_year_data <- suppressWarnings(
+  left_join(affil_country, paper_years, by = "primary_id")
+) %>%
+  filter(!is.na(publication_year))
+
+country_year_counts <- country_year_data %>%
+  distinct(primary_id, COUNTRY, publication_year) %>%
+  count(COUNTRY, publication_year)
+
+top_10_countries <- country_year_counts %>%
+  group_by(COUNTRY) %>%
+  summarise(total = sum(n), .groups = "drop") %>%
+  arrange(desc(total)) %>%
+  slice_head(n = 10) %>%
+  pull(COUNTRY)
+
+top_country_years <- country_year_counts %>%
+  filter(COUNTRY %in% top_10_countries) %>%
+  pivot_wider(names_from = publication_year, values_from = n, values_fill = 0) %>%
+  arrange(desc(rowSums(across(where(is.numeric)))))
+
+top_country_years <- top_country_years %>%
+  rowwise() %>%
+  mutate(
+    aggr = {
+      vals <- c_across(`2014`:`2024`)
+      if (length(vals) > 1 && vals[1] > 0) {
+        round(((vals[length(vals)] / vals[1])^(1 / (length(vals) - 1)) - 1) * 100, 2)
+      } else {
+        NA_real_
+      }
+    },
+    trend = list(c_across(`2014`:`2024`))
+  ) %>%
+  ungroup()
+
+top_country_years %>%
+  gt() %>%
+  gt_plt_sparkline(trend, type = "default") %>%
+  tab_header(title = "Top 10 Countries by Yearly Publications (2014–2024)") %>%
+  cols_label(
+    COUNTRY = "Country",
+    trend = "Trendline",
+    aggr = "Compound Annual Growth Rate (%)"
+  ) %>%
+  fmt_number(
+    columns = aggr,
+    decimals = 2
+  ) %>%
+  tab_options(
+    table.font.size = px(13),
+    heading.align = "center"
+  )
+```
+
+## Top German institutions producing global health research from 2014 to 2024
+
+The table highlights the German institutions that contributed the most to global health publications between 2014 and 2024. For each paper, we extracted the list of contributing institutions from author affiliations. To avoid double-counting, we ensured each institution was only counted once per paper, even it had multiple authors from the same institution. We then aggregated the number of unique papers associated with each institution and ranked them based on publication volume.
+
+```{r institute DE, echo=FALSE}
+# Ensure the identifier is unique for each institution
+top_institutions_germany <- openalex_pubmed_affil %>%
+  filter(!is.na(institution_display_name)) %>%
+  filter(COUNTRY == "Germany") %>%
+  distinct(primary_id, institution_display_name, .keep_all = TRUE) %>%
+  count(institution_display_name, sort = TRUE)
+
+top_institutions_germany %>% 
+  gt() %>% 
+  tab_header(
+    title = md("Top German Institutions from 2014 to 2024")
+  ) %>%
+  cols_label(
+    institution_display_name = "Institution Name",
+    n = "Number of Papers"
+  ) %>% 
+  sub_missing(columns = everything(), missing_text = "-") %>% 
+  opt_interactive(
+    use_search = FALSE, 
+    use_sorting = TRUE, 
+    use_filters = TRUE,  
+    page_size_default = 10 
+  ) %>%
+  tab_options(
+    table.font.size = px(14), 
+    table.border.top.width = px(0),  
+    heading.align = "center"  
+  )
+```
+
+## Top German Institutions in 2024
+
+This table shows the contributing German institutions to global health publications in the year 2024.
+
+```{r institute DE 2024, echo=FALSE}
+top_institutions_germany_2024 <- affil_2024 %>%
+  filter(!is.na(institution_display_name)) %>%
+  filter(COUNTRY == "Germany") %>%
+  distinct(primary_id, institution_display_name, .keep_all = TRUE) %>%
+  count(institution_display_name, sort = TRUE)
+
+top_institutions_germany_2024 %>% 
+  gt() %>% 
+  tab_header(
+    title = md("Top Germany Institutions in 2024")
+  ) %>%
+  cols_label(
+    institution_display_name = "Institution Name",
+    n = "Number of Papers"
+  ) %>% 
+  sub_missing(columns = everything(), missing_text = "-") %>% 
+  opt_interactive(
+    use_search = FALSE, 
+    use_sorting = TRUE, 
+    use_filters = TRUE,  
+    page_size_default = 10 
+  ) %>%
+  tab_options(
+    table.font.size = px(14), 
+    table.border.top.width = px(0),  
+    heading.align = "center"  
+  )
+```
+
+## All articles with German affiliation
+
+This table shows the basic information of articles that have at least one affiliation in Germany.
+
+```{r german articles, echo=FALSE}
+# Step 1: Create primary paper info with citation and ID
+all_papers_count <- openalex_pubmed_papers %>%
+  mutate(
+    num_citations = coalesce(num_citations_cf, num_citations_oa, 0),
+  ) %>%
+  select(primary_id, title, abstract, journal_title, publication_date, url, publication_year, num_citations)
+
+# Step 2: Prepare author names, fallback to first_name + last_name
+check_papers_author <- openalex_pubmed_affil %>%
+  mutate(
+    display_name_filled = case_when(
+      !is.na(au_display_name) ~ au_display_name,
+      !is.na(first_name) & !is.na(last_name) ~ paste(first_name, last_name),
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(primary_id)) %>%
+  group_by(primary_id) %>%
+  summarise(
+    author_list = paste(unique(display_name_filled[!is.na(display_name_filled)]), collapse = "; "),
+    .groups = "drop"
+  )
+
+# Step 3: Identify papers with at least one German affiliation
+german_primary_ids <- openalex_pubmed_affil %>%
+  filter(COUNTRY == "Germany" & !is.na(primary_id)) %>%
+  distinct(primary_id) %>%
+  pull(primary_id)
+
+# Step 4: Merge metadata and filter German papers
+germany_papers <- all_papers_count %>%
+  filter(primary_id %in% german_primary_ids) %>%
+  left_join(check_papers_author, by = "primary_id") %>%
+  relocate(publication_year, .after = publication_date)
+
+germany_papers$abstract <- str_remove_all(germany_papers$abstract, "<h3>.*?</h3>")
+germany_papers$abstract <- str_trim(germany_papers$abstract)
+
+# Step 5: Add abstract column with Read More/Less toggle
+sanitize_text <- function(text) {
+  text %>%
+    str_replace_all("&", "and") %>%
+    str_replace_all("['’“”—]", "") %>%
+    str_replace_all("–", "-") %>%
+    stringi::stri_trans_general("Latin-ASCII")
+}
+
+sanitize_text_safe <- function(text) {
+  ifelse(is.na(text), NA, sanitize_text(text))
+}
+
+# Sanitize before adding read-more
+germany_papers <- germany_papers %>%
+  mutate(across(c(title, abstract, author_list), sanitize_text_safe))
+```
+
+```{r big table, echo=FALSE, warning=FALSE}
+# Then build read-more content
+germany_papers_prepped <- germany_papers %>%
+  mutate(
+    url = ifelse(
+      !is.na(url),
+      paste0('<a href="', url, '" target="_blank">Link</a>'),
+      NA_character_
+    ),
+    abstract = ifelse(
+      !is.na(abstract) & nchar(abstract) > 100,
+      paste0(
+        substr(abstract, 1, 100),
+        '... <a href="javascript:void(0)" class="read-more">Read more</a>',
+        '<span class="full-abstract" style="display:none;">',
+        substr(abstract, 101, nchar(abstract)),
+        '</span> <a href="javascript:void(0)" class="read-less" style="display:none;"> Read less</a>'
+      ),
+      abstract
+    ),
+    author_list = ifelse(
+      !is.na(author_list) & nchar(author_list) > 100,
+      paste0(
+        substr(author_list, 1, 100),
+        '... <a href="javascript:void(0)" class="read-more">Read more</a>',
+        '<span class="full-abstract" style="display:none;">',
+        substr(author_list, 101, nchar(author_list)),
+        '</span> <a href="javascript:void(0)" class="read-less" style="display:none;"> Read less</a>'
+      ),
+      author_list
+    )
+  )
+
+
+# Step 6: Display in interactive GT table
+# Use the cleaned, prepped data for rendering
+germany_papers_prepped %>%
+  select(title, abstract, journal_title, publication_date, publication_year, url, author_list, num_citations) %>%
+  gt() %>%
+  fmt_markdown(columns = c("url", "abstract", "author_list")) %>%
+  cols_label(
+    title = "Paper Title",
+    abstract = "Abstract",
+    journal_title = "Journal Title",
+    publication_date = "Publication Date",
+    publication_year = "Publication Year",
+    url = "Link",
+    author_list = "Authors",
+    num_citations = "Citation Counts"
+  ) %>%
+  sub_missing(columns = everything(), missing_text = "-") %>%
+  opt_interactive(
+    use_search = TRUE,
+    use_sorting = TRUE,
+    use_filters = TRUE,
+    page_size_default = 20
+  ) %>%
+  tab_options(
+    table.font.size = px(14),
+    table.border.top.width = px(0),
+    heading.align = "center"
+  ) 
+```
+
+<script>
+  document.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('.read-more').forEach(function(link) {
+      link.addEventListener('click', function(e) {
+        e.preventDefault();
+        const full = this.nextElementSibling;
+        const less = full.nextElementSibling;
+        full.style.display = 'inline';
+        less.style.display = 'inline';
+        this.style.display = 'none';
+      });
+    });
+
+    document.querySelectorAll('.read-less').forEach(function(link) {
+      link.addEventListener('click', function(e) {
+        e.preventDefault();
+        const full = this.previousElementSibling;
+        const more = full.previousElementSibling;
+        full.style.display = 'none';
+        this.style.display = 'none';
+        more.style.display = 'inline';
+      });
+    });
+  });
+</script>
+
+
+## Top Journals for Global Health Publications
+
+```{r global journal, echo=FALSE}
+check_papers <- openalex_pubmed_affil %>%
+  group_by(primary_id) %>%
+  summarise(
+    all_countries = paste(unique(COUNTRY[!is.na(COUNTRY)]), collapse = "; "),  # Concatenate unique countries
+    .groups = "drop"
+  )
+
+all_journal <- all_papers_count %>%
+  left_join(check_papers, by = "primary_id") %>%  # Merge country info
+  filter(!is.na(all_countries)) # Ensure only papers with country data remain
+
+top_journals <- all_journal %>%
+  filter(!is.na(journal_title)) %>%
+  count(journal_title, sort = TRUE)
+
+top_journals %>%
+  gt() %>%
+  tab_header(
+    title = "Top Journals of Global Institutions"
+  ) %>%
+  cols_label(
+    journal_title = "Journal",
+    n = "Number of Publications"
+  ) %>%
+  opt_interactive(
+    use_search = FALSE,
+    use_sorting = TRUE,
+    use_filters = TRUE,
+    page_size_default = 10
+  ) %>%
+  tab_options(
+    table.font.size = px(14),
+    heading.align = "center"
+  )
+```
+
+
+## Top Journals for Germany Global Health Publications
+
+Of all articles that had an author with at least one affiliation in Germany, 155 articles were published in PLOS ONE.
+
+```{r german journals, echo=FALSE}
+germany_journal <- all_papers_count %>%
+  left_join(check_papers, by = "primary_id") %>%  # Merge country info
+  filter(!is.na(all_countries)) %>%  # Ensure only papers with country data remain
+  filter(str_detect(all_countries, "Germany"))
+
+# Create table of top journals based on number of publications
+top_german_journals <- germany_journal %>%
+  filter(!is.na(journal_title)) %>%
+  count(journal_title, sort = TRUE) %>%
+  slice_head(n = 10)  # Adjust this number if needed
+
+top_german_journals %>%
+  gt() %>%
+  tab_header(
+    title = "Top Journals of German Institutions"
+  ) %>%
+  cols_label(
+    journal_title = "Journal",
+    n = "Number of Publications"
+  ) %>%
+  opt_interactive(
+    use_search = FALSE,
+    use_sorting = TRUE,
+    use_filters = TRUE,
+    page_size_default = 10
+  ) %>%
+  tab_options(
+    table.font.size = px(14),
+    heading.align = "center"
+  )
+```
+
+## Frequency table of Keywords and MESH terms from journal "The Lancet Global Health" and "BMJ Open" and "Bmj Global Health"
+```{r frequency table, echo=FALSE, warning=FALSE, message=FALSE}
+# 1. Generate frequency tables for all journals
+journals <- c("The Lancet Global Health", "Bmj Open", "Bmj Global Health")
+
+# Helper function to generate keyword and MeSH frequency tables
+generate_freq_tables <- function(data, journal_name) {
+  data_filtered <- data %>%
+    filter(str_to_lower(journal_title) == str_to_lower(journal_name))
+  
+  # Keyword frequency table
+  keyword_freq <- data_filtered %>%
+    filter(!is.na(keywords)) %>%
+    mutate(keyword = strsplit(keywords, ";|,")) %>%
+    unnest(keyword) %>%
+    mutate(keyword = str_trim(str_to_lower(keyword))) %>%
+    filter(keyword != "") %>%
+    count(keyword, sort = TRUE) %>%
+    rename(term = keyword, frequency = n)
+  
+  # MeSH frequency table
+  mesh_freq <- data_filtered %>%
+    filter(!is.na(MESH_terms)) %>%
+    mutate(mesh = strsplit(MESH_terms, ";|,")) %>%
+    unnest(mesh) %>%
+    mutate(mesh = str_trim(str_to_lower(mesh))) %>%
+    filter(mesh != "") %>%
+    count(mesh, sort = TRUE) %>%
+    rename(term = mesh, frequency = n)
+  
+  return(list(
+    keyword = keyword_freq,
+    mesh = mesh_freq
+  ))
+}
+
+all_freqs <- lapply(journals, function(journal) {
+  tables <- generate_freq_tables(openalex_pubmed_papers, journal)
+  list(
+    keyword = mutate(tables$keyword, journal = journal),
+    mesh = mutate(tables$mesh, journal = journal)
+  )
+})
+
+# 2. Combine into two big tables
+all_keywords <- bind_rows(lapply(all_freqs, function(x) x$keyword)) %>%
+  relocate(journal, .before = term)
+
+all_mesh <- bind_rows(lapply(all_freqs, function(x) x$mesh)) %>%
+  relocate(journal, .before = term)
+
+# 3. Optional: Show only top N terms per journal
+top_n_per_journal <- function(df, n = 15) {
+  df %>%
+    group_by(journal) %>%
+    slice_max(frequency, n = n, with_ties = FALSE) %>%
+    ungroup()
+}
+
+keywords_top <- top_n_per_journal(all_keywords, n = 15)
+mesh_top <- top_n_per_journal(all_mesh, n = 15)
+
+# 4. Render GT tables
+render_freq_table_multi <- function(df, title) {
+  gt(df) %>%
+    tab_header(title = title) %>%
+    fmt_number(columns = frequency, decimals = 0) %>%
+    cols_label(
+      journal = "Journal",
+      term = "Term",
+      frequency = "Frequency"
+    ) %>%
+    tab_options(
+      table.font.size = px(12),
+      data_row.padding = px(2),
+      table.width = pct(80),
+      heading.align = "left"
+    )
+}
+
+# 5. Display both tables
+render_freq_table_multi(keywords_top, "Top Keywords Across Selected Journals")
+render_freq_table_multi(mesh_top, "Top MeSH Terms Across Selected Journals")
+```
+
+
+## Top 1000 Global Institutions from 2014 to 2024
+
+The top 1000 global institutions producing global health publications from 2014 to 2024 (limiting to 100 to avoid printing an extremely large table of 47k+ rows).
+
+```{r institutions, echo=FALSE}
+# Ensure the identifier is unique for each institution
+top_institutions_global <- openalex_pubmed_affil %>%
+  filter(!is.na(institution_display_name)) %>%
+  distinct(primary_id, institution_display_name, COUNTRY, .keep_all = TRUE) %>%
+  count(institution_display_name, COUNTRY, sort = TRUE)
+
+top_institutions_global %>% 
+  slice_head(n = 1000) %>%
+  gt() %>% 
+  tab_header(
+    title = md("Top 1000 Global Institutions from 2014 to 2024")
+  ) %>%
+  cols_label(
+    institution_display_name = "Institution Name",
+    COUNTRY = "Country",
+    n = "Number of Papers"
+  ) %>% 
+  sub_missing(columns = everything(), missing_text = "-") %>% 
+  opt_interactive(
+    use_search = FALSE, 
+    use_sorting = TRUE, 
+    use_filters = TRUE,  
+    page_size_default = 10 
+  ) %>%
+  tab_options(
+    table.font.size = px(14), 
+    table.border.top.width = px(0),  
+    heading.align = "center"  
+  )
+```
+
+In case you wonder why you haven't heard much about London School of Hygiene & Tropical Medicine and wonder what papers they produce, here're 50 papers produced by them, chosen randomly. 
+
+```{r inspect paper, echo=FALSE}
+top_inst_paper <- openalex_pubmed_affil %>%
+  filter(institution_display_name == "London School of Hygiene & Tropical Medicine") %>%
+  select(primary_id)
+
+paper_titles <- openalex_pubmed_papers %>%
+  filter(primary_id %in% top_inst_paper$primary_id) %>%
+  sample_n(50)
+
+paper_titles %>% 
+  select(title, journal_title, publication_date, doi) %>%
+  gt() %>% 
+  cols_label(
+    title = "Paper Title",
+    journal_title = "Journal Title",
+    publication_date = "Publication Date",
+    doi = "DOI"
+  ) %>% 
+  sub_missing(columns = everything(), missing_text = "-") %>% 
+  opt_interactive(
+    use_search = TRUE,  
+    use_sorting = TRUE,  
+    use_filters = TRUE,  
+    page_size_default = 10  
+  ) %>%
+  tab_options(
+    table.font.size = px(14), 
+    table.border.top.width = px(0),  
+    heading.align = "center"  
+  )
+```
+
+
+## Top 1000 Global Institutions in 2024
+
+The top 1000 global institutions producing global health publications in 2024 (limiting to 100 to avoid printing an extremely large table of 41k+ rows).
+
+```{r institutions 2024, echo=FALSE}
+# Ensure the identifier is unique for each institution
+top_institutions_global_24 <- affil_2024 %>%
+  filter(!is.na(institution_display_name)) %>%
+  distinct(primary_id, institution_display_name, COUNTRY, .keep_all = TRUE) %>%
+  count(institution_display_name, COUNTRY, sort = TRUE)
+
+top_institutions_global_24 %>% 
+  slice_head(n = 1000) %>%
+  gt() %>% 
+  tab_header(
+    title = md("Top 1000 Global Institutions in 2024")
+  ) %>%
+  cols_label(
+    institution_display_name = "Institution Name",
+    COUNTRY = "Country",
+    n = "Number of Papers"
+  ) %>% 
+  sub_missing(columns = everything(), missing_text = "-") %>% 
+  opt_interactive(
+    use_search = FALSE, 
+    use_sorting = TRUE, 
+    use_filters = TRUE,  
+    page_size_default = 10 
+  ) %>%
+  tab_options(
+    table.font.size = px(14), 
+    table.border.top.width = px(0),  
+    heading.align = "center"  
+  )
+```
+
+
+## Co-publishing between countries (Germany's partners)
+
+This table is constructed by identifying all global health research papers that include at least one contributor affiliated with Germany. For each of these papers, we extract all other countries that are listed as collaborators. Then, we count the frequency of each non-German country appearing in these papers. The resulting count represents the number of collaborative papers between Germany and each partner country, ranked from highest to lowest based on how often they appear as co-authors with Germany. For example, if the United States appears in 2,657 such papers, it means that Germany and the U.S. have co-published 2,657 papers together during 2014-2024.
+
+```{r co-publishing countries, echo=FALSE}
+germany_collab <- all_papers_count %>%
+  left_join(check_papers, by = "primary_id") %>%  # Merge country info
+  filter(!is.na(all_countries)) %>%  # Ensure only papers with country data remain
+  filter(all_countries != "Germany") %>%  # Filter for papers involving Germany
+  filter(str_detect(all_countries, "Germany"))
+
+germany_collab_expanded <- germany_collab %>%
+  separate_rows(all_countries, sep = "; ") %>%  # Split into multiple rows
+  filter(all_countries != "Germany")  # Remove Germany itself to get co-countries
+
+germany_network_table <- germany_collab_expanded %>%
+  group_by(all_countries) %>%
+  summarise(paper_count = n_distinct(primary_id), .groups = "drop") %>%
+  arrange(desc(paper_count))  # Sort by most collaborations
+
+germany_network_table %>% 
+  gt() %>% 
+  tab_header(
+    title = md("Germany's Top Collaborating Countries in Global Health Publications")
+  ) %>%
+  cols_label(
+    paper_count = "Number of Collaborative Papers",
+    all_countries = "Countries"
+  ) %>% 
+  sub_missing(columns = everything(), missing_text = "-") %>% 
+  opt_interactive(
+    use_search = FALSE, 
+    use_sorting = TRUE, 
+    use_filters = TRUE,  
+    page_size_default = 10 
+  ) %>%
+  tab_options(
+    table.font.size = px(14), 
+    table.border.top.width = px(0),  
+    heading.align = "center"  
+  )
+```
+
+## Co-publishing between institutions (Germany & global institutions)
+
+This table is generated by first identifying all research papers in global health that include at least one German institution among the contributors. For each of these papers, we extract the names of all other institutions worldwide that also appear as co-authors. We then count how frequently each non-German institution appears in these collaborative papers. The result shows the number of times a given institution has co-published with German institutions. The table is then sorted by the number of papers, highlighting the top institutional collaborators with Germany. For instance, if the University of Oxford appears in 201 papers, it means it has collaborated in 201 papers with at least one German institution.
+
+```{r co-publishing institutions, echo=FALSE}
+# Get all paper IDs where Germany is one of the countries
+check_papers_german <- check_papers %>%
+  filter(str_detect(all_countries, "Germany")) %>%
+  pull(primary_id)
+
+# Get all institutions
+institution_collab <- openalex_pubmed_affil %>%
+  filter(primary_id %in% check_papers_german) %>%  # only papers involving Germany
+  filter(!is.na(institution_display_name), COUNTRY != "Germany")  # exclude German institutions
+
+# Count how many German papers each institution appears in
+top_collab_institutions <- institution_collab %>%
+  group_by(institution_display_name, COUNTRY) %>%
+  summarise(paper_count = n_distinct(primary_id), .groups = "drop") %>%
+  arrange(desc(paper_count))
+
+top_collab_institutions %>%
+  gt() %>%
+  tab_header(title = "Top Institutions Collaborating with Germany in Global Health") %>%
+  cols_label(
+    institution_display_name = "Institution",
+    COUNTRY = "Country",
+    paper_count = "Number of Collaborative Papers"
+  ) %>%
+  sub_missing(columns = everything(), missing_text = "-") %>% 
+  opt_interactive(
+    use_search = FALSE, 
+    use_sorting = TRUE, 
+    use_filters = TRUE,  
+    page_size_default = 10 
+  ) %>%
+  tab_options(
+    table.font.size = px(14)
+  )
+```
+
+## Most Cited German Global Health Papers
+
+Here we include all German papers ranked by citation counts, including papers that did not provide country information.
+
+```{r citations, echo=FALSE}
+all_papers_count_top_10_germany <- all_papers_count %>%
+  left_join(check_papers, by = "primary_id") %>%  # Merge country info
+  filter(str_detect(all_countries, "Germany")) %>%  # Filter for papers involving Germany
+  arrange(desc(num_citations))  # Re-rank after filtering
+
+# Create a table using gt
+all_papers_count_top_10_germany %>%
+  select(-abstract) %>%
+  slice_head(n = 10) %>%
+  select(-primary_id) %>%  # Remove primary_id before visualization
+  gt() %>%
+  tab_header(
+    title = "Top 10 Most Cited German Global Health Papers"
+  ) %>%
+  cols_label(
+    title = "Paper Title",
+    num_citations = "Number of Citations",
+    publication_year = "Year",
+    journal_title = "Journal Title",
+    all_countries = "Involved Countries"
+  ) %>%
+  fmt_number(
+    columns = num_citations, decimals = 0  # Ensure citation counts are whole numbers
+  ) %>%
+  opt_interactive(  # Enables search, sorting, and filtering
+    use_search = TRUE,  
+    use_sorting = TRUE,  
+    use_filters = TRUE,  
+    page_size_default = 10  # Adjust rows per page
+  ) %>%
+  tab_options(
+    table.font.size = px(11)  # Ensures better readability
+  )
+```
+
+## Most Cited International Global Health Papers
+
+Here we include all papers ranked by citation counts, even if some papers did not provide country information.
+
+```{r all paper citation, echo=FALSE}
+# Check the papers with the same title
+all_papers <- openalex_pubmed_papers %>%
+  mutate(title = str_squish(title)) %>%
+  group_by(title) %>%
+  filter(n()>1) %>%
+  ungroup()
+#nrow(all_papers) #9649 rows of duplicated papers but different versions and sometimes different abstracts
+  
+all_papers_count_top_10 <- all_papers_count %>%
+  left_join(check_papers, by = "primary_id") %>%  # Merge country info
+    # Ensure only papers with country data remain
+  arrange(desc(num_citations)) %>%  # Re-rank after filtering
+  slice_head(n = 10)  # Extract top 10 papers
+
+# Create a table using gt
+all_papers_count_top_10 %>%
+  select(-primary_id, -abstract) %>%  # Remove primary_id before visualization
+  gt() %>%
+  tab_header(
+    title = "Top 10 Most Cited International Global Health Papers"
+  ) %>%
+  cols_label(
+    title = "Paper Title",
+    num_citations = "Number of Citations",
+    publication_year = "Year",
+    journal_title = "Journal Title",
+    all_countries = "Involved Countries"
+  ) %>%
+  fmt_number(
+    columns = num_citations, decimals = 0  # Ensure citation counts are whole numbers
+  ) %>%
+  opt_interactive(  # Enables search, sorting, and filtering
+    use_search = TRUE,  
+    use_sorting = TRUE,  
+    use_filters = TRUE,  
+    page_size_default = 10  # Adjust rows per page
+  ) %>%
+  tab_options(
+    table.font.size = px(11)
+  )
+```
+

@@ -6,7 +6,7 @@ in_path <- here("data/2-cleaned/openalex")
 # ============================
 # Combine AUTHORS CSVs
 # ============================
-authors_out_path <- here("data/3-merged/openalex_authors_combined_2014_2024.csv")
+authors_out_path <- here("data/2-cleaned/openalex_authors_combined_2014_2024.csv")
 
 # Get a list of all CSV files in the folder
 authors_csv_files <- list.files(
@@ -27,7 +27,7 @@ print(glue("Combined {length(authors_csv_files)} files and saved to {authors_out
 # ============================
 # Combine PAPERS CSVs
 # ============================
-papers_out_path <- here("data/3-merged/openalex_papers_combined_2014_2024.csv")
+papers_out_path <- here("data/2-cleaned/openalex_papers_combined_2014_2024.csv")
 
 # Pattern to match both query and journal paper CSVs
 papers_csv_files <- list.files(
