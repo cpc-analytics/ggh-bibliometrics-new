@@ -5,23 +5,21 @@ pacman::p_load(dplyr, readr, here, glue, stringr, purrr, tidyr, tidyverse)
 pubmed_author <- read_csv("data/2-cleaned/pubmed_authors_combined_2014_2024.csv")
 nrow(pubmed_author)#447064
 
-separated_affil <- pubmed_author %>%
-  mutate(original_affiliation = affiliation) %>%
-  separate_rows(affiliation, sep = "\\[-AFFIL-SEP-\\]") %>%   # Split into rows
-  select(original_affiliation, affiliation) %>%
-  filter(!is.na(affiliation)) %>%                                # Remove NA
-  mutate(affiliation = str_squish(affiliation)) %>%              # Trim extra spaces
-  distinct()                                          
+pubmed_author_sep <- pubmed_author %>%
+  separate_rows(affiliation, sep = "\\[-AFFIL-SEP-\\]") %>%
+  mutate(affiliation = str_squish(affiliation))
 
-nrow(separated_affil)#310173
+nrow(pubmed_author_sep)#526908
 
-unique_affil <- separated_affil %>%
-  select(affiliation) %>%
+unique_affil <- pubmed_author_sep %>% 
+  filter(!is.na(affiliation) & affiliation != "") %>% 
+  select(affiliation) %>% 
   distinct()
+
 nrow(unique_affil)#254450
 
 # -----clean the strings -------
-balanced_clean_affiliation <- function(text_vector) {
+balanced_clean_affiliation <- function(text_vector) { #TOTO phone number
   text_vector %>%
     # 1. Remove emails & URLs
     str_remove_all("\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b") %>%
@@ -59,11 +57,9 @@ balanced_clean_affiliation <- function(text_vector) {
 unique_affil <- unique_affil %>%
   mutate(
     revised_clean = balanced_clean_affiliation(affiliation)
-  ) %>%
-  filter(revised_clean != "") %>%
-  filter(!is.na(revised_clean))
+  )
 
-separated_affil_cleaned <- separated_affil %>%
+pubmed_author_ <- pubmed_author_sep %>%
   left_join(unique_affil, by = "affiliation")   # Join on 'affiliation' to get 'revised_clean'
 nrow(separated_affil_cleaned)#310173
 

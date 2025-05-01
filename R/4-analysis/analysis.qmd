@@ -24,14 +24,34 @@ pacman::p_load(gt, gtExtras, countrycode, stringdist, tinytex, htmltools)
 
 ```{r overview, include=FALSE}
 # read the df
-openalex_pubmed_papers <- fread(here("data/3-merged/openalex_pubmed_papers_merged_2025-04-29.csv"))
-nrow(openalex_pubmed_papers)#105605
+openalex_pubmed_papers <- fread(here("data/3-merged/openalex_pubmed_papers_merged_2025-04-30.csv"))
+nrow(openalex_pubmed_papers)#119311
+
+openalex_pubmed_papers <- openalex_pubmed_papers %>%
+  mutate(primary_id = coalesce(as.character(pmid), as.character(oa_id)))
 
 papers_2024 <- openalex_pubmed_papers %>%
   filter(publication_year == "2024")
-nrow(papers_2024)#18437
+nrow(papers_2024)#20422
 ```
 
+```{r affil overview, include=FALSE}
+openalex_pubmed_affil <- fread(here("data/3-merged/openalex_pubmed_authors_merged_2025-04-30.csv"))
+
+openalex_pubmed_affil <- openalex_pubmed_affil %>%
+  mutate(primary_id = coalesce(as.character(pmid), as.character(oa_id)))
+
+length(unique(openalex_pubmed_affil$primary_id))
+
+affil_2024 <- openalex_pubmed_affil %>%
+  filter(primary_id %in% papers_2024$primary_id)
+length(unique(affil_2024$primary_id))
+
+na_institution_name <- openalex_pubmed_affil %>% filter(is.na(institution_display_name)) %>% nrow()
+na_country <- openalex_pubmed_affil %>% filter(is.na(institution_country_code)) %>% nrow()
+na_institution_name_perc <- na_institution_name / nrow(openalex_pubmed_affil)
+na_country_perc <- na_country / nrow(openalex_pubmed_affil)
+```
 
 # Overview
 
@@ -45,10 +65,31 @@ n_pubmed <- openalex_pubmed_papers %>% filter(from_pubmed == TRUE) %>% nrow()
 n_both <- openalex_pubmed_papers %>%
   filter(from_openalex == TRUE & from_pubmed == TRUE) %>%
   nrow()
+
+pmid_source_summary <- openalex_pubmed_affil %>%
+  distinct(primary_id, source) %>%                # Remove duplicates if same source repeated
+  group_by(primary_id) %>%
+  summarise(source_count = n_distinct(source),
+            sources = paste(sort(unique(source)), collapse = " & ")) %>%
+  ungroup() %>%
+  count(sources, name = "n_pmids")          # Count how many pmids fall into each source pattern
+
+
+n_openalex_author <- pmid_source_summary %>%
+  filter(sources == "OpenAlex") %>%
+  pull(n_pmids)
+
+n_pubmed_author <- pmid_source_summary %>%
+  filter(sources == "PubMed") %>%
+  pull(n_pmids)
+
+n_both_author <- pmid_source_summary %>%
+  filter(sources == "OpenAlex & PubMed") %>%
+  pull(n_pmids)
 ```
 
 ```{r plot, echo=FALSE}
-plot_data <- tibble(
+plot_data_paper <- tibble(
   Source = c("OpenAlex Only", "PubMed Only", "Both"),
   Count = c(
     n_openalex - n_both,
@@ -56,13 +97,14 @@ plot_data <- tibble(
     n_both
   )
 )
+shared_y_max <- max(c(plot_data_paper$Count, plot_data_author$Count))
 
-ggplot(plot_data, aes(x = Source, y = Count, fill = Source)) +
+plot_paper <- ggplot(plot_data_paper, aes(x = Source, y = Count, fill = Source)) +
   geom_bar(stat = "identity", width = 0.6) +
   geom_text(aes(label = scales::comma(Count)), 
             vjust = -0.5, size = 4) +
   scale_fill_viridis_d(option = "D") +
-  scale_y_continuous(labels = scales::comma) +  # Format y-axis labels as plain numbers
+  scale_y_continuous(labels = scales::comma, limits = c(0, shared_y_max)) +
   labs(
     title = "Paper Source Distribution",
     subtitle = glue::glue("n = {scales::comma(n_openalex + n_pubmed - n_both)}"),
@@ -75,45 +117,38 @@ ggplot(plot_data, aes(x = Source, y = Count, fill = Source)) +
     plot.title = element_text(hjust = 0.5),
     plot.subtitle = element_text(hjust = 0.5)
   )
-```
 
-```{r affil overview, include=FALSE}
-openalex_pubmed_affil <- fread("data/3-merged/openalex_pubmed_affil.csv")
 
-# convert iso two letter country code into country name
-openalex_pubmed_affil <- openalex_pubmed_affil %>%
-  mutate(
-    COUNTRY = ifelse(country_code == "XK", "Kosovo", COUNTRY),  # Handle XK first
-    COUNTRY = ifelse(is.na(COUNTRY) & !is.na(country_code), 
-                     suppressWarnings(countrycode(country_code, "iso2c", "country.name")),  # Suppress XK warning
-                     COUNTRY)
+plot_data_author <- tibble(
+  Source = c("OpenAlex Only", "PubMed Only", "Both"),
+  Count = c(
+    n_openalex_author,
+    n_pubmed_author,
+    n_both_author
+  )
+)
+
+plot_author <- ggplot(plot_data_author, aes(x = Source, y = Count, fill = Source)) +
+  geom_bar(stat = "identity", width = 0.6) +
+  geom_text(aes(label = scales::comma(Count)), vjust = -0.5, size = 4) +
+  scale_fill_viridis_d(option = "D") +
+  scale_y_continuous(labels = scales::comma, limits = c(0, shared_y_max)) +
+  labs(
+    title = "Author Source Distribution",
+    subtitle = glue::glue("n = {scales::comma(n_openalex_author + n_pubmed_author + n_both_author)}"),
+    x = NULL, y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5)
   )
 
-openalex_pubmed_affil <- openalex_pubmed_affil %>%
-  mutate(
-    institution_display_name = case_when(
-      institution_display_name == "Ludwig Maximilians University (LMU)" ~ "Ludwig-Maximilians-Universität München",
-      institution_display_name == "Technical University of Munich (TUM)" ~ "Technical University of Munich",
-      institution_display_name == "Free University of Berlin (FU Berlin)" ~ "Freie Universität Berlin",
-      institution_display_name == "Charité University Medicine Berlin" ~ "Charité - Universitätsmedizin Berlin",
-      institution_display_name == "Humboldt University of Berlin (HU Berlin)" ~ "Humboldt-Universität zu Berlin",
-      institution_display_name == "German Center for Infection Research" ~ "German Center for Infection Research (DZIF)",
-      institution_display_name == "Federal Institute for Risk Assessment" ~ "Federal Institute for Risk Assessment (BfR)",
-      institution_display_name == "University of Tübingen (Uni Tübingen)" ~ "University of Tübingen",
-      TRUE ~ institution_display_name  # Keep original if no match
-    )
-  )
+library(patchwork)
 
-openalex_pubmed_affil <- openalex_pubmed_affil %>%
-  mutate(primary_id = coalesce(as.character(pmid), as.character(oa_id)))
-
-affil_2024 <- openalex_pubmed_affil %>%
-  filter(primary_id %in% papers_2024$primary_id)
-
-na_institution_name <- openalex_pubmed_affil %>% filter(is.na(institution_display_name)) %>% nrow()
-na_country <- openalex_pubmed_affil %>% filter(is.na(COUNTRY)) %>% nrow()
-na_institution_name_perc <- na_institution_name / nrow(openalex_pubmed_affil)
-na_country_perc <- na_country / nrow(openalex_pubmed_affil)
+# Show side by side
+plot_paper + plot_author + plot_layout(ncol = 2)
 ```
 
 Out of the total records in the affiliations dataset,  `r round(na_institution_name_perc * 100, 2)`% do not have institution names recorded,  and `r round(na_country_perc * 100, 2)`% are missing country information.
@@ -143,9 +178,9 @@ This table highlights the countries that contributed the most to global health p
 ```{r countries, echo=FALSE}
 # filter logic to avoid double counting different institutions in the same country
 top_country <- openalex_pubmed_affil %>%
-  filter(!is.na(COUNTRY)) %>%
-  distinct(primary_id, COUNTRY, .keep_all = TRUE) %>%
-  count(COUNTRY, sort = TRUE)
+  filter(!is.na(institution_country_code)) %>%
+  distinct(primary_id, institution_country_code, .keep_all = TRUE) %>%
+  count(institution_country_code, sort = TRUE)
 
 top_country %>% 
   gt() %>% 
@@ -153,7 +188,7 @@ top_country %>%
     title = md("Top Producing Countries from 2014 to 2024")
   ) %>%
   cols_label(
-    COUNTRY = "Country",
+    institution_country_code = "Country Code",
     n = "Number of Papers"
   ) %>%
   sub_missing(columns = everything(), missing_text = "-") %>% 
@@ -176,9 +211,9 @@ This table shows the countries that contributed the most to global health public
 
 ```{r top country 2024, echo=FALSE}
 top_country_2024 <- affil_2024 %>%
-  filter(!is.na(COUNTRY)) %>%
-  distinct(primary_id, COUNTRY, .keep_all = TRUE) %>%
-  count(COUNTRY, sort = TRUE)
+  filter(!is.na(institution_country_code)) %>%
+  distinct(primary_id, institution_country_code, .keep_all = TRUE) %>%
+  count(institution_country_code, sort = TRUE)
 
 top_country_2024 %>% 
   gt() %>% 
@@ -186,7 +221,7 @@ top_country_2024 %>%
     title = md("Top Producing Countries in 2024")
   ) %>%
   cols_label(
-    COUNTRY = "Country",
+    institution_country_code = "Country Code",
     n = "Number of Papers"
   ) %>% 
   sub_missing(columns = everything(), missing_text = "-") %>% 
@@ -213,12 +248,11 @@ paper_years <- openalex_pubmed_papers %>%
   mutate(
     publication_year = as.character(publication_year)
   ) %>%
-  select(primary_id, publication_year) %>%
-  filter(publication_year != "2025")
+  select(primary_id, publication_year)
 
 affil_country <- openalex_pubmed_affil %>%
-  filter(!is.na(COUNTRY)) %>%
-  select(primary_id, COUNTRY) %>%
+  filter(!is.na(institution_country_code)) %>%
+  select(primary_id, institution_country_code) %>%
   distinct()  # Remove duplicates
 
 country_year_data <- suppressWarnings(
@@ -227,18 +261,18 @@ country_year_data <- suppressWarnings(
   filter(!is.na(publication_year))
 
 country_year_counts <- country_year_data %>%
-  distinct(primary_id, COUNTRY, publication_year) %>%
-  count(COUNTRY, publication_year)
+  distinct(primary_id, institution_country_code, publication_year) %>%
+  count(institution_country_code, publication_year)
 
 top_10_countries <- country_year_counts %>%
-  group_by(COUNTRY) %>%
+  group_by(institution_country_code) %>%
   summarise(total = sum(n), .groups = "drop") %>%
   arrange(desc(total)) %>%
   slice_head(n = 10) %>%
-  pull(COUNTRY)
+  pull(institution_country_code)
 
 top_country_years <- country_year_counts %>%
-  filter(COUNTRY %in% top_10_countries) %>%
+  filter(institution_country_code %in% top_10_countries) %>%
   pivot_wider(names_from = publication_year, values_from = n, values_fill = 0) %>%
   arrange(desc(rowSums(across(where(is.numeric)))))
 
@@ -262,7 +296,7 @@ top_country_years %>%
   gt_plt_sparkline(trend, type = "default") %>%
   tab_header(title = "Top 10 Countries by Yearly Publications (2014–2024)") %>%
   cols_label(
-    COUNTRY = "Country",
+    institution_country_code = "Country Code",
     trend = "Trendline",
     aggr = "Compound Annual Growth Rate (%)"
   ) %>%
