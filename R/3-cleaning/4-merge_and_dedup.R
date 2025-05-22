@@ -3,7 +3,7 @@ pacman::p_load(dplyr, readr, here, glue, stringr, tidyr)
 
 # Define directories
 cleaned_dir <- here("data/2-cleaned")
-merged_dir  <- here("data/3-merged")
+merged_dir  <- here("data/4-results")
 dir.create(merged_dir, showWarnings = FALSE, recursive = TRUE)
 
 # --- Read Data ---

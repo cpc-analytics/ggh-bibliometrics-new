@@ -101,15 +101,13 @@ author_joined <- author_joined %>%
   select(-origin_pb, -origin_oa)
 
 author_joined_dedup <- author_joined %>%
-  group_by(pmid, au_display_name, au_id) %>%
-  summarise(
+  mutate(
     # Coalesce columns, prioritize openalex values
     au_affiliation_raw = coalesce(au_affiliation_raw_oa, au_affiliation_raw_pb),
     institution_ror = coalesce(institution_ror, ror_id),
     institution_type   = coalesce(institution_type_oa, institution_type_pb),
     institution_display_name = coalesce(institution_display_name, institution),
-    institution_country_code = coalesce(institution_country_code, country_code),
-    .groups = "drop"
+    institution_country_code = coalesce(institution_country_code, country_code)
   ) %>%
   select(
     pmid, oa_id, au_id, au_display_name, au_affiliation_raw,
@@ -120,11 +118,24 @@ author_joined_dedup <- author_joined %>%
   ) %>%
   distinct()
 
-nrow(author_joined)
-nrow(author_joined_dedup)
+nrow(author_joined_dedup) #863936
 
-author_joined_dedup <- author_joined_dedup %>%
+author_deduped <- author_joined_dedup %>%
+  distinct(pmid, au_display_name, institution_display_name, .keep_all = TRUE)
+
+nrow(author_deduped) #744585
+
+author_deduped <- author_joined_dedup %>%
   mutate(primary_id = coalesce(as.character(pmid), as.character(oa_id)))
 
-write_csv(author_joined_dedup, "data/3-merged/openalex_pubmed_authors_merged_{Sys.Date()}.csv")
+# --- Save Output ---
+output_file <- file.path("data/4-results", glue("openalex_pubmed_authors_merged_{Sys.Date()}.csv"))
+write_csv(author_deduped, output_file)
 
+# Then create a ZIP alongside it:
+zip_file <- sub("\\.csv$", ".zip", output_file)
+# On most systems R’s utils::zip will invoke the system “zip” command
+utils::zip(zipfile = zip_file, files = output_file)
+
+message(glue("Saved merged and deduplicated dataset to: {output_file}"))
+message(glue("Also created ZIP archive for sharing: {zip_file}"))
