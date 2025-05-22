@@ -58,6 +58,14 @@ combined_df_clean <- combined_df %>%
     language         = coalesce(language_oa, language_pb),
     publication_year = coalesce(publication_year_oa, publication_year_pb),
     origin           = coalesce(origin_oa, origin_pb),
+    num_citations,
+    num_citations_cf,
+    keywords,
+    MESH_terms,
+    version,
+    url,
+    issn_l,
+    search_date,
     oa_id
   ) %>%
   

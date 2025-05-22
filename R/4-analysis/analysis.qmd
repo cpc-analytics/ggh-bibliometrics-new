@@ -16,23 +16,22 @@ knitr::opts_chunk$set(echo = TRUE)
 pacman::p_load(tidyverse, lubridate, ggplot2, ggrepel, stringr, tibble, dplyr, janitor)
 
 # Then load table + file manipulation
-pacman::p_load(here, readxl, jsonlite, httr, knitr, data.table, tidyr, stringi)
+pacman::p_load(here, readxl, jsonlite, httr, knitr, data.table, tidyr, stringi, cli)
 
 # Then load extras separately
-pacman::p_load(gt, gtExtras, countrycode, stringdist, tinytex, htmltools)
+pacman::p_load(gt, gtExtras, countrycode, stringdist, tinytex, htmltools, patchwork)
 ```
 
 ```{r overview, include=FALSE}
 # read the df
-openalex_pubmed_papers <- fread(here("data/3-merged/openalex_pubmed_papers_merged_2025-04-30.csv"))
-nrow(openalex_pubmed_papers)#119311
+openalex_pubmed_papers <- fread(here("data/4-results/openalex_pubmed_papers_merged_2025-05-22.csv"))
+nrow(openalex_pubmed_papers)#119347
 
 # make journal titles consistent
 openalex_pubmed_papers <- openalex_pubmed_papers %>%
   mutate(journal_title = journal_title %>% str_replace("^The Lancet\\.", "The Lancet") %>%
          str_squish() %>%
-         str_to_title()
-           )
+         str_to_title())
 
 openalex_pubmed_papers <- openalex_pubmed_papers %>%
   mutate(
@@ -47,7 +46,7 @@ nrow(papers_2024)#20422
 ```
 
 ```{r affil overview, include=FALSE}
-openalex_pubmed_affil <- fread(here("data/3-merged/openalex_pubmed_authors_merged_2025-04-30.csv"))
+openalex_pubmed_affil <- fread(here("data/4-results/openalex_pubmed_authors_merged_2025-05-22.csv"))
 
 # Update institution names in openalex_pubmed_affil
 openalex_pubmed_affil <- openalex_pubmed_affil %>%
@@ -76,54 +75,54 @@ if ("institution_country_code" %in% names(openalex_pubmed_affil)) {
 openalex_pubmed_affil <- openalex_pubmed_affil %>%
   mutate(primary_id = coalesce(as.character(pmid), as.character(oa_id)))
 
-length(unique(openalex_pubmed_affil$primary_id))#94963
+length(unique(openalex_pubmed_affil$primary_id))#115864
 
 affil_2024 <- openalex_pubmed_affil %>%
   filter(primary_id %in% papers_2024$primary_id)
-length(unique(affil_2024$primary_id))#15839
+length(unique(affil_2024$primary_id))#19049
 
 na_institution_name <- openalex_pubmed_affil %>% filter(is.na(institution_display_name)) %>% nrow()
-na_country <- openalex_pubmed_affil %>% filter(is.na(country_name)) %>% nrow()
+na_country <- openalex_pubmed_affil %>% filter(is.na(institution_country_code)) %>% nrow()
 na_institution_name_perc <- na_institution_name / nrow(openalex_pubmed_affil)
 na_country_perc <- na_country / nrow(openalex_pubmed_affil)
 ```
 
-# Overview
+### Overview
 
-The datasets we are analyzing are from OpenAlex and PubMed with "global health" exist in paper title or abstract. There are originally 66264 articles from PubMed and 105635 articles from OpenAlex. After de-duplication, there are in total `r nrow(openalex_pubmed_papers)` articles from OpenAlex and PubMed in the course of last 11 years (2014 to 2024). We removed 24400 duplicates by comparing the identifiers `doi` and `pmid` and `openalex id` and merged entries from OpenAlex and PubMed. 
+The datasets we are analyzing are from two means:
 
-Note: we only look at non-retracted, published articles of the following type: article, review, book, book-chapter, editorial, letter, report, case reports, meta analysis, comment, systematic review, comparative study.
+- **Papers with “global health”** in title or abstract on OpenAlex / PubMed  
+- **All papers** in the following journals:
 
-```{r ggplot, include=FALSE}
+  - *The Lancet Global Health*  
+  - *Bulletin of the World Health Organization*  
+  - *The Lancet Planetary Health*  
+  - *BMJ Global Health*  
+  - *Globalization and Health*  
+  - *Pathogens and Global Health*  
+  - *Journal of Global Health*  
+  - *Global Health Research and Policy*  
+  - *Journal of Epidemiology and Global Health*  
+  - *Cambridge Prisms: Global Mental Health*  
+  - *Annals of Global Health*  
+  - *Global Health: Science and Practice*  
+  - *Global Public Health*  
+  - *Clinical Epidemiology and Global Health*  
+  - *Global Health Action*  
+  - *Global Health Promotion*  
+  - *PLOS Global Public Health*
+ 
+Note: We only look at non-retracted, published articles of the following type: article, review, book, book-chapter, editorial, letter, report, case reports, meta analysis, comment, systematic review, comparative study.
+
+```{r ggplot source, include=FALSE}
+# whether the paper is from openalex or pubmed
 n_openalex <- openalex_pubmed_papers %>% filter(from_openalex == TRUE) %>% nrow()
 n_pubmed <- openalex_pubmed_papers %>% filter(from_pubmed == TRUE) %>% nrow()
 n_both <- openalex_pubmed_papers %>%
   filter(from_openalex == TRUE & from_pubmed == TRUE) %>%
   nrow()
 
-pmid_source_summary <- openalex_pubmed_affil %>%
-  distinct(primary_id, source) %>%                # Remove duplicates if same source repeated
-  group_by(primary_id) %>%
-  summarise(source_count = n_distinct(source),
-            sources = paste(sort(unique(source)), collapse = " & ")) %>%
-  ungroup() %>%
-  count(sources, name = "n_pmids")          # Count how many pmids fall into each source pattern
-
-n_openalex_author <- pmid_source_summary %>%
-  filter(sources == "OpenAlex") %>%
-  pull(n_pmids)
-
-n_pubmed_author <- pmid_source_summary %>%
-  filter(sources == "PubMed") %>%
-  pull(n_pmids)
-
-n_both_author <- pmid_source_summary %>%
-  filter(sources == "OpenAlex & PubMed") %>%
-  pull(n_pmids)
-```
-
-```{r plot, echo=FALSE}
-plot_data_paper <- tibble(
+plot_paper_source <- tibble(
   Source = c("OpenAlex Only", "PubMed Only", "Both"),
   Count = c(
     n_openalex - n_both,
@@ -132,72 +131,216 @@ plot_data_paper <- tibble(
   )
 )
 
-plot_data_author <- tibble(
-  Source = c("OpenAlex Only", "PubMed Only", "Both"),
+# whether the author affil is from openalex or pubmed
+id_source_summary <- openalex_pubmed_affil %>%
+  distinct(primary_id, .keep_all = TRUE) %>%    # one row per PMID × source
+  count(source, name = "Count")     # tally how many PMIDs in each source
+
+plot_author_source <- id_source_summary %>%
+  mutate(
+    Source = case_when(
+      source == "OpenAlex"          ~ "OpenAlex Only",
+      source == "PubMed"            ~ "PubMed Only",
+      source == "PubMed & OpenAlex" ~ "Both",
+      TRUE                           ~ source
+    )
+  ) %>%
+  # now select exactly the two columns we want
+  select(Source, Count)
+
+# whether the paper is from query or journal
+n_query <- openalex_pubmed_papers %>% filter(origin == "query") %>% nrow()
+n_journal <- openalex_pubmed_papers %>% filter(origin == "journal") %>% nrow()
+n_both_origin <- openalex_pubmed_papers %>% filter(origin == "query & journal") %>% nrow()
+
+plot_paper_origin <- tibble(
+  Source = c("Query Only", "Journal Only", "Both"),
   Count = c(
-    n_openalex_author,
-    n_pubmed_author,
-    n_both_author
+    n_query,
+    n_journal,
+    n_both_origin
   )
 )
 
-shared_y_max <- max(c(plot_data_paper$Count, plot_data_author$Count))
+id_origin_summary <- openalex_pubmed_affil %>%
+  distinct(primary_id, .keep_all = TRUE) %>%    # one row per PMID × source
+  count(origin, name = "Count")     # tally how many PMIDs in each source
 
-plot_paper <- ggplot(plot_data_paper, aes(x = Source, y = Count, fill = Source)) +
-  geom_bar(stat = "identity", width = 0.6) +
-  geom_text(aes(label = scales::comma(Count)), 
-            vjust = -0.5, size = 4) +
-  scale_fill_viridis_d(option = "D") +
-  scale_y_continuous(labels = scales::comma, limits = c(0, shared_y_max)) +
-  labs(
-    title = "Paper Source Distribution",
-    subtitle = glue::glue("n = {scales::comma(n_openalex + n_pubmed - n_both)}"),
-    x = NULL,
-    y = NULL
-  ) +
-  theme_minimal() +
-  theme(
-    legend.position = "none",
-    plot.title = element_text(hjust = 0.5),
-    plot.subtitle = element_text(hjust = 0.5)
-  )
+plot_author_origin <- id_origin_summary %>%
+  mutate(
+    Source = case_when(
+      origin == "query"              ~ "Query Only",
+      origin == "journal"            ~ "Journal Only",
+      origin == "query & journal"    ~ "Both",
+      TRUE                           ~ origin
+    )
+  ) %>%
+  # now select exactly the two columns we want
+  select(Source, Count)
+```
 
-plot_author <- ggplot(plot_data_author, aes(x = Source, y = Count, fill = Source)) +
-  geom_bar(stat = "identity", width = 0.6) +
+```{r plot, echo=FALSE}
+shared_y_max <- max(
+  plot_paper_source$Count,
+  plot_author_source$Count,
+  plot_paper_origin$Count,
+  plot_author_origin$Count,
+  na.rm = TRUE
+)
+
+plot_paper <- ggplot(plot_paper_source, aes(x = Source, y = Count, fill = Source)) +
+  geom_col(width = 0.6) +
   geom_text(aes(label = scales::comma(Count)), vjust = -0.5, size = 4) +
   scale_fill_viridis_d(option = "D") +
-  scale_y_continuous(labels = scales::comma, limits = c(0, shared_y_max)) +
+  scale_y_continuous(labels = scales::comma, limits = c(0, shared_y_max * 1.25)) +
   labs(
-    title = "Author Source Distribution",
-    subtitle = glue::glue("n = {scales::comma(n_openalex_author + n_pubmed_author + n_both_author)}"),
+    title    = "Paper Source Distribution",
+    subtitle = glue::glue("n = {scales::comma(n_openalex - n_both + n_pubmed - n_both + n_both)}"),
     x = NULL, y = NULL
   ) +
   theme_minimal() +
   theme(
-    legend.position = "none",
-    plot.title = element_text(hjust = 0.5),
-    plot.subtitle = element_text(hjust = 0.5)
+    legend.position   = "none",
+    plot.title        = element_text(hjust = 0.5),
+    plot.subtitle     = element_text(hjust = 0.5)
   )
 
-library(patchwork)
+plot_author <- ggplot(plot_author_source, aes(x = Source, y = Count, fill = Source)) +
+  geom_col(width = 0.6) +
+  geom_text(aes(label = scales::comma(Count)), vjust = -0.5, size = 4) +
+  scale_fill_viridis_d(option = "D") +
+  scale_y_continuous(labels = scales::comma, limits = c(0, shared_y_max * 1.25)) +
+  labs(
+    title    = "Author Source Distribution",
+    subtitle = glue::glue("n = {scales::comma(sum(plot_author_source$Count))}"),
+    x = NULL, y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position   = "none",
+    plot.title        = element_text(hjust = 0.5),
+    plot.subtitle     = element_text(hjust = 0.5)
+  )
 
-# Show side by side
-plot_paper + plot_author + plot_layout(ncol = 2)
+plot_queryjournal <- ggplot(plot_paper_origin, aes(x = Source, y = Count, fill = Source)) +
+  geom_col(width = 0.6) +
+  geom_text(aes(label = scales::comma(Count)), vjust = -0.5, size = 4) +
+  scale_fill_viridis_d(option = "D") +
+  scale_y_continuous(labels = scales::comma, limits = c(0, shared_y_max * 1.25)) +
+  labs(
+    title    = "Paper Query/Journal Distribution",
+    subtitle = glue::glue("n = {scales::comma(sum(plot_paper_origin$Count))}"),
+    x = NULL, y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position   = "none",
+    plot.title        = element_text(hjust = 0.5),
+    plot.subtitle     = element_text(hjust = 0.5)
+  )
+
+plot_authororigin <- ggplot(plot_author_origin, aes(x = Source, y = Count, fill = Source)) +
+  geom_col(width = 0.6) +
+  geom_text(aes(label = scales::comma(Count)), vjust = -0.5, size = 4) +
+  scale_fill_viridis_d(option = "D") +
+  scale_y_continuous(labels = scales::comma, limits = c(0, shared_y_max * 1.25)) +
+  labs(
+    title    = "Author Query/Journal Distribution",
+    subtitle = glue::glue("n = {scales::comma(sum(plot_author_origin$Count))}"),
+    x = NULL, y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position   = "none",
+    plot.title        = element_text(hjust = 0.5),
+    plot.subtitle     = element_text(hjust = 0.5)
+  )
+
+# Build a 2×2 grid, with the bottom-right cell a spacer
+layout <- (plot_paper | plot_author) /
+          (plot_queryjournal | plot_authororigin)
+
+layout + plot_layout(widths = c(1,1), heights = c(1,1))
 ```
 
-Out of the total records in the affiliations dataset,  `r round(na_institution_name_perc * 100, 2)`% do not have institution names recorded,  and `r round(na_country_perc * 100, 2)`% are missing country information.
+Out of the total records in the affiliations dataset,  `r round(na_institution_name_perc * 100, 2)`% do not have institution names recorded, and `r round(na_country_perc * 100, 2)`% are missing country information.
 
-### Deduplication
+### Data transformation and pre-processing
 
-1. 24400 duplicated rows were removed from OpenAlex data by grouping `pmid` and `doi` and `oa_id` and prioritize highest citation counts and the latest date.
-2. After full join OpenAlex and PubMed data, we grouped by `doi` and `pmid` and merged the duplicated rows (mostly when OpenAlex has missing value in `pmid` while PubMed data have valid `pmid` info). The merged column information prioritize taking OpenAlex's information and then PubMed, 2746 duplicated rows were removed.
-3. For affiliation information from papers that both exist in OpenAlex and PubMed, we prioritize using OpenAlex's information and fall back to PubMed's information if the affiliation information is not available in OpenAlex.
+1. **Source-specific deduplication**
 
-# Affiliation Cleaning Results
+  - **PubMed-only**: Of the original 66264 PubMed rows, we built a joint key `coalesce(doi, pmid)`, kept all rows where that key was `NA`, and for the rest collapsed any "query" vs "journal" duplicates by relabeling to "query & journal". This removed 2543 duplicate rows.
+  
+  - **OpenAlex-only**: Starting from 105716 OpenAlex rows, we built `coalesce(doi, pmid, oa_id)` again preserving all `NA`-key rows and collapsing query/journal duplicates in the same way. This removed 5177 duplicate rows.
+  
+2. **Cross-source merge**
 
-### PubMed Completeness
+Next we performed a full join of PubMed and OpenAlex data based on the combined key (`doi`, `pmid`). 41 600 papers appeared in both sources. After joining we coalesced every field to prefer OpenAlex's value first, falling back to PubMed only when OpenAlex was `NA.` 
 
-ROR API Matching: We pass all affiliation strings through the ROR API, 74.2% of the affiliations were matched until this step. 67% of the matches have a score of 1, while 7% of the matches have a score from 0.9 to 0.99.
+3. **Affiliation matching & deduplication**
+
+We pass all PubMed affiliation strings through the ROR API, matching 74.2% of them (67% at score = 1, 7% at 0.9-0.99), which constitutes for `r round(na_institution_name_perc * 100, 2)` of the papers. We then full-joined the ROR-parsed PubMed affiliations with OpenAlex's based on both `pmid` and `au_display_name` (author name). For affiliations that exist in both sources, we prioritized OpenAlex's values. 
+
+
+### Score Distribution
+
+```{r score distribution, echo=FALSE}
+ror_affiliations_full_results <- read_excel(here("data/3-merged/ror_affiliations_full_results.xlsx"))
+
+# Prepare count data per score
+score_counts <- ror_affiliations_full_results %>%
+  filter(is.finite(score)) %>%
+  count(score) %>%
+  arrange(score)
+
+ggplot(score_counts, aes(x = factor(score), y = n)) +
+  geom_col(fill = "#4575b4", color = "black") +
+  geom_text(aes(label = n), vjust = -0.3, size = 3) +
+  labs(
+    title = "Distribution of ROR Confidence Scores",
+    x = "Score",
+    y = "Number of Affiliations"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black")
+  )
+
+```
+
+
+### Score Distribution of German Institutions
+
+```{r score distribution germany, echo=FALSE}
+german_affils_with_score <- openalex_pubmed_affil %>%
+  filter(str_detect(country_name, regex("Germany", ignore_case = TRUE)))
+
+score_counts_germany <- german_affils_with_score %>%
+  filter(is.finite(score)) %>%
+  count(score) %>%
+  arrange(score)
+
+ggplot(score_counts_germany, aes(x = factor(score), y = n)) +
+  geom_col(fill = "#4575b4", color = "black") +
+  geom_text(aes(label = n), vjust = -0.3, size = 3) +
+  labs(
+    title = "Distribution of ROR Confidence Scores\nfor Affiliations in Germany",
+    x = "Score",
+    y = "Number of Affiliations"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black")
+  )
+```
 
 ## Top Producing Countries from 2014 to 2024
 
@@ -269,7 +412,7 @@ top_country_2024 %>%
 
 This table shows the top 10 countries in terms of the number of global health publications per year from 2014 to 2024. Each row represents a country, with yearly publication counts, the Compound Annual Growth Rate (CAGR) over the 11-year period, and a trendline visualization. In the trendline, purple dot represents the **first value** in the trend (i.e., the value in 2014) and green dot represents the **last value** in the trend (i.e., the value in 2024). 
 
-Leading example: The United States had 3,359 publications in 2014, increasing to 8,724 in 2024, with a CAGR of 10.01%, meaning the number of publications grew by about 10% per year on average, compounded annually. The U.S. trendline shows strong early growth in publications, peaking around 2021, followed by a slight decline. The green dot (2024) sits lower than the peak and appears mid-line, signaling that while there's been growth overall (CAGR of 10%), recent years saw a tapering off rather than continued upward movement.
+Leading example: Switzerland had 149 publications in 2014, increasing to 518 in 2024, with a CAGR of 13.27%, meaning the number of publications grew by 13.27% per year on average, compounded annually. The Switzerland trendline shows strong early growth in publications, peaking around 2023, followed by a slight decline. The green dot (2024 data) sits lower than the peak and appears to the left, signaling that while there's been growth overall, 2024 saw a tapering off rather than continued upward movement.
 
 ```{r publications by country by year, echo=FALSE}
 paper_years <- openalex_pubmed_papers %>%
@@ -633,7 +776,10 @@ top_german_journals %>%
   )
 ```
 
-## Frequency table of Keywords and MESH terms from journal "The Lancet Global Health" and "BMJ Open" and "Bmj Global Health"
+## Frequency table of Keywords and MESH terms from top global health journals
+
+Frequency distribution of author-assigned keywords and indexed MeSH (Medical Subject Headings) terms in articles published in The Lancet Global Health and BMJ Global Health. This visualization highlights thematic emphasis and term usage patterns across global health journals.
+
 ```{r frequency table, echo=FALSE, warning=FALSE, message=FALSE}
 # 1. Generate frequency tables for all journals
 journals <- c("The Lancet Global Health", "Bmj Global Health")
@@ -755,7 +901,7 @@ top_institutions_global %>%
   )
 ```
 
-In case you wonder why you haven't heard much about London School of Hygiene & Tropical Medicine and wonder what papers they produce, here are 50 papers produced by them, chosen randomly. 
+Here presents 50 randomly chosen papers produced by London School of Hygiene & Tropical Medicine.
 
 ```{r inspect paper, echo=FALSE}
 top_inst_paper <- openalex_pubmed_affil %>%
