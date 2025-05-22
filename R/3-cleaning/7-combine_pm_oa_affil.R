@@ -1,40 +1,43 @@
 # Load required libraries
-pacman::p_load(dplyr, readr, here, glue, stringr, purrr, tidyr, tidyverse, data.table)
+pacman::p_load(dplyr, readr, here, glue, stringr, purrr, tidyr, tidyverse, data.table, readxl)
 
+# Merge ror results back in the affiliations
 ror_affiliations_full_results <- read_excel("data/3-merged/ror_affiliations_full_results.xlsx")
+unique_affil <- read_csv("data/2-cleaned/unique_affil.csv")
+pubmed_author_sep <- read_csv("data/ref/pubmed_author_sep.csv")
 
+nrow(unique_affil)#254450
+length(unique(unique_affil$revised_clean))#224902
+nrow(ror_affiliations_full_results)#224900
+sum(is.na(ror_affiliations_full_results$institution))#57990
 
 pubmed_affil_all <- ror_affiliations_full_results %>%
   left_join(unique_affil, by = "revised_clean") %>%   # Join on 'affiliation' to get 'revised_clean'
   relocate(affiliation, .before = revised_clean) %>%
   full_join(pubmed_author_sep, by = "affiliation") %>%
   relocate(pmid, last_name, first_name, initials, affiliation, .before = revised_clean) %>%
-  filter(!is.na(affiliation)) %>%
-  distinct()
-nrow(pubmed_affil_all)#510545
-length(unique(pubmed_affil_all$pmid))#63487
+  distinct() %>%
+  mutate(source = "PubMed")
 
-
-# sanity check------------
-pubmed_affil_all %>%
-  filter(is.na(affiliation)) %>%
-  nrow()
-
+nrow(pubmed_affil_all)#546539
+sum(is.na(pubmed_affil_all$institution))#142980
+length(unique(pubmed_affil_all$pmid))#65365
 
 # compare the available affil between pubmed and openalex
 openalex_authors <- fread("data/2-cleaned/openalex_authors_combined_2014_2024.csv") %>%
   distinct() %>%
-  filter(!is.na(au_affiliation_raw))
+  mutate(source = "OpenAlex")
 
-nrow(openalex_authors)#523640
-length(unique(openalex_authors$pmid))#55696
-colnames(openalex_authors)
+nrow(openalex_authors)#585073
+length(unique(openalex_authors$pmid))#57323
 
 length(intersect(
   unique(filter(openalex_authors, !is.na(pmid))$pmid),
   unique(filter(pubmed_affil_all, !is.na(pmid))$pmid)
 ))
+#52386
 
+# Normalize the author name for matching
 pubmed_authors_prepped <- pubmed_affil_all %>%
   mutate(
     au_display_name = str_squish(paste(first_name, last_name))
@@ -44,7 +47,7 @@ pubmed_authors_prepped <- pubmed_affil_all %>%
     institution_type = institution_types
   ) %>%
   select(-lat, -lng)
-nrow(pubmed_authors_prepped)#510545
+nrow(pubmed_authors_prepped)#546539
 
 openalex_authors_prepped <- openalex_authors %>%
   mutate(
@@ -53,8 +56,9 @@ openalex_authors_prepped <- openalex_authors %>%
       str_replace_all("(?<=[A-Z])(?=[A-Z])", " ") %>% # Add space between adjacent capitals (e.g., SP → S P)
       str_squish()                                    # Clean up extra whitespace
   )
-nrow(openalex_authors_prepped)#523640
+nrow(openalex_authors_prepped)#610535
 
+# full join on pmid, author name
 author_joined <- full_join(
   pubmed_authors_prepped,
   openalex_authors_prepped,
@@ -62,54 +66,65 @@ author_joined <- full_join(
   suffix = c("_pb", "_oa")
 )
 
-author_pubmed_only <- author_joined %>%
-  filter(!is.na(au_affiliation_raw_pb)) %>%
-  transmute(
-    pmid, au_display_name,
-    source = "PubMed",
-    au_id = NA_character_,
-    au_affiliation_raw = au_affiliation_raw_pb,
-    institution_id = NA_character_,
-    institution_ror = ror_id,
-    institution_display_name = institution,
-    institution_country_code = country_code,
-    institution_type = institution_type_pb
-  )
+sum(is.na(pubmed_authors_prepped$pmid))#0
+sum(is.na(openalex_authors_prepped$pmid))#202622
+nrow(author_joined)#893873
 
-author_openalex_only <- author_joined %>%
-  filter(!is.na(au_affiliation_raw_oa)) %>%
-  transmute(
-    pmid, au_display_name,
-    source = "OpenAlex",
-    oa_id,
-    au_id,
-    au_affiliation_raw = au_affiliation_raw_oa,
-    institution_id,
-    institution_ror,
-    institution_display_name,
-    institution_country_code,
-    institution_type = institution_type_oa
-  )
+# clean up the source column
+author_joined <- author_joined %>%
+  mutate(
+    source = case_when(
+      !is.na(source_pb) & !is.na(source_oa) ~ "PubMed & OpenAlex",
+      is.na(source_pb) & !is.na(source_oa)  ~ source_oa,
+      !is.na(source_pb) & is.na(source_oa)  ~ source_pb,
+      TRUE                                  ~ NA_character_
+    )
+  ) %>%
+  select(-source_pb, -source_oa)
 
-author_combined <- bind_rows(author_pubmed_only, author_openalex_only) %>%
-  filter(!is.na(institution_display_name)) %>%
-  distinct(pmid, au_display_name, institution_display_name, .keep_all = TRUE) 
+# clean up the query/journal origin column
+author_joined <- author_joined %>%
+  mutate(
+    origin = case_when(
+      # Both present and equal → just use either value
+      !is.na(origin_pb) & !is.na(origin_oa) & origin_pb == origin_oa ~ origin_pb,
+      # Both present and different → query & journal
+      !is.na(origin_pb) & !is.na(origin_oa) & origin_pb != origin_oa ~ "query & journal",
+      # Only PubMed side present
+      !is.na(origin_pb) &  is.na(origin_oa)                      ~ origin_pb,
+      # Only OpenAlex side present
+      is.na(origin_pb)  & !is.na(origin_oa)                     ~ origin_oa,
+      # Neither → NA
+      TRUE                                                          ~ NA_character_
+    )
+  ) %>%
+  select(-origin_pb, -origin_oa)
 
-pmid_source_summary <- author_combined %>%
-  distinct(pmid, source) %>%                # Remove duplicates if same source repeated
-  group_by(pmid) %>%
-  summarise(source_count = n_distinct(source),
-            sources = paste(sort(unique(source)), collapse = " & ")) %>%
-  ungroup() %>%
-  count(sources, name = "n_pmids")          # Count how many pmids fall into each source pattern
+author_joined_dedup <- author_joined %>%
+  group_by(pmid, au_display_name, au_id) %>%
+  summarise(
+    # Coalesce columns, prioritize openalex values
+    au_affiliation_raw = coalesce(au_affiliation_raw_oa, au_affiliation_raw_pb),
+    institution_ror = coalesce(institution_ror, ror_id),
+    institution_type   = coalesce(institution_type_oa, institution_type_pb),
+    institution_display_name = coalesce(institution_display_name, institution),
+    institution_country_code = coalesce(institution_country_code, country_code),
+    .groups = "drop"
+  ) %>%
+  select(
+    pmid, oa_id, au_id, au_display_name, au_affiliation_raw,
+    institution_ror, institution_display_name,
+    institution_country_code, institution_type,
+    origin, source, score, related_institutions, 
+    relationship_types, related_ror_ids
+  ) %>%
+  distinct()
 
-print(pmid_source_summary)
+nrow(author_joined)
+nrow(author_joined_dedup)
 
-write_csv(author_combined, "data/3-merged/openalex_pubmed_authors_merged_2025-04-30.csv")
+author_joined_dedup <- author_joined_dedup %>%
+  mutate(primary_id = coalesce(as.character(pmid), as.character(oa_id)))
 
+write_csv(author_joined_dedup, "data/3-merged/openalex_pubmed_authors_merged_{Sys.Date()}.csv")
 
-low_score_results <- ror_affiliations_full_results %>%
-  filter(score == "0.9") %>%
-  filter(institution!="Erasmus MC") %>%
-  select(revised_clean, ror_id, matching_type, institution)
-View(low_score_results)
