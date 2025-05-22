@@ -3,13 +3,15 @@ pacman::p_load(dplyr, readr, here, glue, stringr, purrr, tidyr, tidyverse)
 
 # import pubmed author csv
 pubmed_author <- read_csv("data/2-cleaned/pubmed_authors_combined_2014_2024.csv")
-nrow(pubmed_author)#447064
+nrow(pubmed_author)#463342
 
 pubmed_author_sep <- pubmed_author %>%
   separate_rows(affiliation, sep = "\\[-AFFIL-SEP-\\]") %>%
   mutate(affiliation = str_squish(affiliation))
 
 nrow(pubmed_author_sep)#526908
+
+write_csv(pubmed_author_sep, "data/ref/pubmed_author_sep.csv")
 
 unique_affil <- pubmed_author_sep %>% 
   filter(!is.na(affiliation) & affiliation != "") %>% 
@@ -58,12 +60,7 @@ unique_affil <- unique_affil %>%
   mutate(
     revised_clean = balanced_clean_affiliation(affiliation)
   )
-
-pubmed_author_ <- pubmed_author_sep %>%
-  left_join(unique_affil, by = "affiliation")   # Join on 'affiliation' to get 'revised_clean'
-nrow(separated_affil_cleaned)#310173
-
-write_csv(separated_affil_cleaned, "data/ref/affil_map_table.csv")
+write_csv(unique_affil, "data/2-cleaned/unique_affil.csv")
 
 revised_clean_only <- separated_affil_cleaned %>%
   select(revised_clean) %>%
