@@ -11,47 +11,49 @@ paper_files <- list.files(
   full.names = TRUE
 )
 
-if (length(paper_files) == 0) {
-  stop("No combined paper files found in data/2-cleaned")
-}
+if (length(paper_files) == 0) stop("No combined paper files found in data/2-cleaned")
 
-# Process each file
 for (file in paper_files) {
   message(glue("Processing file: {basename(file)}"))
   
   papers_df <- read_csv(file, show_col_types = FALSE) %>%
     mutate(
-      doi  = str_trim(doi),
-      pmid = str_trim(pmid)
+      doi    = str_trim(doi),
+      pmid   = str_trim(pmid),
+      origin = as.character(origin)
     )
   
   before_n <- nrow(papers_df)
   
-  # Deduplicate logic
   deduped_df <- papers_df %>%
-    # First, remove duplicates where DOI is available
-    mutate(doi_flag = if_else(is.na(doi), FALSE, TRUE)) %>%
-    group_by(doi_flag) %>%
-    filter(!doi_flag | row_number() == 1 | !duplicated(doi)) %>%
+    # define the grouping key: DOI if present, otherwise PMID
+    mutate(group_key = coalesce(doi, pmid)) %>%
+    filter(!is.na(group_key)) %>%
+    
+    # within each group, mark if both sources exist
+    group_by(group_key) %>%
+    mutate(
+      both_sources = all(c("query","journal") %in% origin)
+    ) %>%
+    # prefer the journal row first
+    arrange(desc(origin == "journal")) %>%
+    # pick the top row per group
+    slice(1) %>%
     ungroup() %>%
-    # Then, remove duplicates where PMIDs exist
-    mutate(pmid_flag = if_else(is.na(pmid), FALSE, TRUE)) %>%
-    group_by(pmid_flag) %>%
-    filter(!pmid_flag | row_number() == 1 | !duplicated(pmid)) %>%
-    ungroup() %>%
-    select(-doi_flag, -pmid_flag)
+    
+    # if both were present, override origin
+    mutate(
+      origin = if_else(both_sources, "query & journal", origin)
+    ) %>%
+    select(-group_key, -both_sources)
   
-  after_n <- nrow(deduped_df)
+  after_n  <- nrow(deduped_df)
   removed_n <- before_n - after_n
-  
   message(glue("Deduplicated {removed_n} rows (from {before_n} to {after_n})."))
   
-  # Define output file
   dedup_file <- str_replace(basename(file), "\\.csv$", "_dedup.csv")
-  dedup_path <- file.path(merged_dir, dedup_file)
-  
-  write_csv(deduped_df, dedup_path)
-  message(glue("Saved deduplicated file to: {dedup_path}\n"))
+  write_csv(deduped_df, file.path(merged_dir, dedup_file))
+  message(glue("Saved to: {dedup_file}\n"))
 }
 
-message("Deduplication process completed.")
+message("Deduplication completed.")
