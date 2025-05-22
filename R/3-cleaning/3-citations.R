@@ -19,20 +19,7 @@ citation_results <- read_csv(output_path, show_col_types = FALSE) %>%
 
 # === CLEAN MERGED CITATION DATA ===
 citation_results_clean <- citation_results %>%
-  mutate(
-    pmid = coalesce(pmid.x, pmid.y),
-    title = coalesce(title.x, title.y),
-    abstract = coalesce(abstract.x, abstract.y),
-    language = coalesce(language.x, language.y),
-    journal_title = coalesce(journal_title.x, journal_title.y),
-    article_type = coalesce(article_type.x, article_type.y),
-    search_date = coalesce(search_date.x, search_date.y),
-    year = coalesce(year.x, year.y)
-  ) %>%
-  select(
-    pmid, num_citations
-  )
-
+  select(pmid, num_citations)
 
 # Read your updated subject matter dataset
 new_subject_matter <- read_csv(here("data/2-cleaned/pubmed_papers_combined_2014_2024_dedup.csv"))
@@ -40,6 +27,15 @@ new_subject_matter <- read_csv(here("data/2-cleaned/pubmed_papers_combined_2014_
 # Start with DOI-based join
 updated_dataset <- new_subject_matter %>%
   left_join(citation_results_clean, by = "pmid")
+
+updated_dataset %>%
+  summarize(
+    total       = n(),
+    matched     = sum(!is.na(num_citations)),
+    unmatched   = sum(is.na(num_citations)),
+    pct_matched   = round(matched/total * 100, 1),
+    pct_unmatched = round(unmatched/total * 100, 1)
+  )
 
 # Save to a new file (so you don't overwrite old ones accidentally)
 new_output_path <- file.path(output_dir, "pubmed_papers_2014_2024_with_citations.csv")
